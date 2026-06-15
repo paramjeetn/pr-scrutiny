@@ -1,464 +1,263 @@
-# PR Scrutiny Agent — Product Specification & Technical Design
+# PR Scrutiny Agent — Spec
 
-**v1.0 · June 2026 · Internal Draft**
+**v1.0 · June 2026**
 
-| Field | Value |
-|---|---|
-| Product | PR Scrutiny Agent — GitHub-native AI code reviewer |
-| Type | GitHub App + Slash-command interface + Webhook integration |
-| Target users | Engineering teams using GitHub for code review |
-| Status | Specification — not yet implemented |
-| Author | Paramjeet (AI Engineering) |
-
-**One-line pitch:** An on-demand AI agent that lives inside GitHub as a first-class reviewer — you summon it with a slash command, it reads the full diff and repo context, posts structured review threads covering security, quality, and intent, then stays in the conversation to answer follow-ups.
+An on-demand AI agent that lives inside GitHub as a first-class reviewer. Summon it with a slash command, it reads the full diff and repo context, posts structured review threads covering security, quality, and intent, then stays in the conversation to answer follow-ups.
 
 ---
 
-## Table of Contents
+## 1. How It Works
 
-1. [Overview & Problem Statement](#section-1-overview--problem-statement)
-2. [Invocation & Trigger Model](#section-2-invocation--trigger-model)
-3. [Security Checks](#section-3-security-checks)
-4. [Code Quality Checks](#section-4-code-quality-checks)
-5. [AI-Powered Understanding](#section-5-ai-powered-understanding)
-6. [End-to-End Review Flow](#section-6-end-to-end-review-flow)
-7. [Technical Architecture](#section-7-technical-architecture)
-8. [Output Format & Severity Model](#section-8-output-format--severity-model)
-9. [Open Questions & Future Work](#section-9-open-questions--future-work)
+### GitHub interaction
 
----
+Two directions:
 
-## Section 1: Overview & Problem Statement
+- **Inbound:** GitHub sends a webhook POST to our endpoint on every relevant event (PR opened, comment created, push). That is how the system wakes up.
+- **Outbound:** We call the GitHub REST API with an Installation Access Token to read diffs, fetch files, and post review comments.
 
-Code review is one of the highest-leverage engineering activities. It is also chronically under-invested. Reviewers are busy, context-switching is expensive, and most review tooling is passive — it sits and waits rather than participating. Security checks happen in CI pipelines that nobody reads until they fail. Intent is rarely captured before a human reviewer even opens the diff.
+Token flow: we sign a JWT with the App's private key → exchange it for a short-lived token scoped to that installation → use it for all API calls in that job.
 
-PR Scrutiny Agent changes the dynamic. It is an active participant in every pull request — one that arrives immediately, reads deeply, and raises the right questions before a human reviewer ever shows up. The goal is not to replace human review. It is to make the human reviewer's time more valuable by handling the legwork and surfacing what actually matters.
+### Wakeup model
 
-### Core problems being solved
+Event-driven, not long-running. GitHub fires webhook → our endpoint receives it → job queued → process runs → done.
 
-- **Security checks are asynchronous and invisible** — they run in CI but nobody reads the logs until a pipeline fails.
-- **Reviewers have no context about intent** — why was this changed, what did the author consider but reject, what are the known risks?
-- **Blast radius is invisible** — which other services, consumers, or contracts are affected by this diff?
-- **Review quality is inconsistent** — different reviewers catch different things; there is no shared baseline.
-- **Async teams waste cycles** — a PR sits for 24 hours before a reviewer even reads the description.
+Start with a long-running server (Fly.io / Railway / Render). Migrate to serverless (Lambda / Cloudflare Workers) if cost or scale demands it.
 
-### Design principles
+Possible runtimes: Cloudflare Workers, AWS Lambda, Fly.io, Railway, Render, self-hosted Docker.
 
-- **On-demand, not ambient** — the agent should not run on every commit like a linter. It is invoked when useful.
-- **Conversational** — the agent posts to the PR thread and responds to replies. It is not a static report.
-- **Structured output** — review comments are grouped by severity and category, not dumped as a wall of text.
-- **Codebase-aware** — the agent reads beyond the diff to understand context: related files, history, dependents.
-- **Developer-friendly** — no false positives, no style nits, no replacing the human. Signal over noise.
+### How users provide their API key
 
----
+1. User installs the GitHub App.
+2. They are redirected to a small settings page we host.
+3. They paste their API key (Anthropic, OpenAI, Gemini, or AWS Bedrock credentials).
+4. We store it encrypted, keyed to their Installation ID.
+5. Every job for that installation uses their key. We never pay for tokens.
 
-## Section 2: Invocation & Trigger Model
+Alternative for self-hosted: `.pr-scrutiny.yml` in the repo pointing to an env var.
 
-The agent can be triggered in three ways: explicit slash commands, automatic triggers on state transitions, and scheduled nudges for stale PRs.
+### Multi-user / multi-repo / multi-PR
 
-### Slash commands (primary interface)
-
-All commands are typed into the PR comment box and dispatched to the agent via GitHub webhook. The agent responds as a new top-level comment within ~30 seconds.
-
-| Command | Description |
-|---|---|
-| `/review` | Full review: security pass, quality pass, blast radius, auto-summary, intent questions. |
-| `/review security` | Security-only pass. Runs secrets scanner, injection surface check, dependency audit, auth gap analysis. |
-| `/review deep` | Full review plus: historical pattern matching, test coverage analysis, complexity scoring on all changed functions. |
-| `/review perf` | Performance-focused pass. Scans for N+1 queries, unbounded loops, large allocations, missing indexes. |
-| `/ask <question>` | Direct question to the agent about the PR. E.g. `/ask why was the retry logic changed?` |
-| `/summarize` | Posts a plain-English TL;DR of what this PR does. Useful before human review begins. |
-| `/blast-radius` | Maps which other modules, services, tests, or API consumers are affected by this diff. |
-| `/re-review` | Re-runs the last full review against the latest commit. Shows delta from the previous pass. |
-| `/approve` | Requests a LGTM from the agent if all checks pass — useful for low-risk PRs with no human reviewers available. |
-
-### Automatic triggers
-
-The agent also activates without being called, in three situations:
-
-- **Draft → Ready transition:** when a PR is marked ready for review, the agent runs `/summarize` and `/review security` automatically, posting the results before any human sees the PR.
-- **No reviewer for 24h:** if a PR has no assigned reviewers and no review comments after 24 hours, the agent posts a `/summarize` and tags the team lead.
-- **Force-push after review:** if the author force-pushes after a review has started, the agent posts a diff of what changed since the last review so reviewers do not have to re-read everything.
-
-### Permissions and installation
-
-The agent is a GitHub App installed at the org level. It requests:
-
-- Read: code, pull requests, issues, checks, metadata
-- Write: pull request reviews, comments, check runs
-- Read: repository contents (for blast radius traversal)
-- Read: Actions (for CI result correlation)
-
-It does not require write access to code. It can never merge, push, or modify files.
-
----
-
-## Section 3: Security Checks
-
-Security is the highest-priority review category. Findings in this category always block the review with a `HOLD` annotation. The agent performs four independent passes:
-
-### 3.1 Secrets scanner
-
-Scans the entire diff — not just added lines — for credential patterns and high-entropy strings.
-
-- **Regex-based detection:** API keys (AWS, GCP, GitHub, Stripe, Twilio patterns), private keys (PEM headers), JWT tokens, connection strings with embedded passwords, Bearer tokens in hardcoded strings.
-- **Entropy analysis:** any string with Shannon entropy above 4.5 bits/char and length > 20 is flagged as potential secret, even without a matching pattern.
-- **Encoding bypass detection:** base64-decodes all strings matching the pattern before scanning. Catches obfuscated secrets.
-- **Environment variable check:** flags cases where a secret-shaped value is assigned directly to a variable rather than read from `process.env` or a secrets manager.
-- **Context awareness:** ignores test fixtures, mock data directories, and `.example` files — but flags if an `.env.example` contains a real-looking value rather than a placeholder.
-
-**False positive handling:** All entropy-flagged strings are shown with their score and the surrounding 3 lines of context, so the developer can quickly confirm or dismiss. The agent never auto-blocks on entropy alone — it posts as a `WARNING`, not a `HOLD`.
-
-### 3.2 Injection surface analysis
-
-Performs taint analysis on added code to detect paths from user-controlled input to dangerous sinks.
-
-- **SQL injection:** traces request parameters through ORM calls, raw query builders, string concatenation into SQL strings. Flags missing parameterization.
-- **Shell injection:** detects `os.system()`, `subprocess` calls, `exec()`, `child_process.exec()` receiving non-literal arguments.
-- **SSTI (Server-Side Template Injection):** flags `template.render()` calls where the template string is constructed from user input.
-- **XSS:** traces user input into `innerHTML`, `document.write()`, `dangerouslySetInnerHTML` in React, and `v-html` in Vue without sanitization.
-- **Path traversal:** flags file system calls (`fs.readFile`, `open()`, `Path.join()`) receiving user-controlled input without validation.
-
-### 3.3 Dependency audit
-
-Checks every package added or version-bumped in the diff against the OSV (Open Source Vulnerabilities) database and the GitHub Advisory Database.
-
-- **CVE cross-reference:** flags packages with known CVEs at CVSS 7.0+. Posts the CVE ID, score, and affected version range.
-- **Yanked/deprecated packages:** flags npm unpublish events, PyPI yanked versions, and packages with no commits in 2+ years.
-- **Supply chain check:** flags packages published within the last 30 days with no prior version history (new package injection risk).
-- **Transitive dependencies:** for critical CVEs (CVSS 9.0+), also checks if any existing transitive dependency is affected.
-
-### 3.4 Auth and access control gaps
-
-Reviews routing changes, middleware stacks, and permission checks for missing or misconfigured access control.
-
-- **New endpoints without middleware:** detects new route handlers in Express, FastAPI, Django, Rails, etc. that are not wrapped in an authentication middleware call.
-- **CORS misconfiguration:** flags `Access-Control-Allow-Origin: *` added without a corresponding allowlist, or `credentials: true` combined with wildcard origin.
-- **JWT verification bypass:** detects `algorithms: 'none'` in JWT decode options, missing signature verification, or accept-all alg patterns.
-- **IDOR risk:** flags new endpoints that take an ID from the request and return a resource without a corresponding ownership check.
-- **Rate limiting absence:** flags new public endpoints that perform expensive operations (DB writes, email sends, external API calls) without a rate limiter.
-
----
-
-## Section 4: Code Quality Checks
-
-Quality checks are informational by default. They post as `SUGGEST` annotations. The author or a human reviewer decides whether to act on them. These checks run on all changed files.
-
-### 4.1 Logic review
-
-The agent reads each changed function semantically and checks for correctness issues that static analysis misses.
-
-- Off-by-one errors in loop bounds, slice indices, and pagination calculations.
-- Condition inversions: flags cases where the condition and its else-branch appear to be swapped based on variable names and surrounding context.
-- Unreachable branches: detects `return` statements followed by more code, always-true/false conditions given the function signature.
-- Null/undefined deref: flags access on a value that has a clear nullable type or a recent null-check path that was not covered.
-- Race conditions: in async code, flags shared mutable state accessed across `await` boundaries without locking.
-
-### 4.2 Complexity analysis
-
-| Aspect | Detail |
-|---|---|
-| Tool | Cyclomatic complexity per changed function |
-| Thresholds | ≤10: pass. 11–20: SUGGEST refactor. >20: WARN with decomposition proposal. |
-| Output | Posts the complexity score on the function signature line. If >20, proposes a specific decomposition. |
-| Cognitive complexity | Also computes cognitive complexity (Sonar metric). Flags if significantly higher than cyclomatic, indicating deeply nested logic. |
-
-### 4.3 Test coverage gaps
-
-Identifies new code paths that are not exercised by any test in the diff or in existing test files.
-
-- For each new function or method, checks if a corresponding test file or test case exists.
-- For new branches (`if/else`, `switch` cases), checks if both branches are tested.
-- Suggests specific test cases: `'This function has no test for the error path when X is null.'`
-- Does not flag existing untested code — only new code added in this PR.
-
-### 4.4 Performance regression flags
-
-- **N+1 queries:** detects DB calls inside loops. Suggests batch loading or eager loading patterns.
-- **Missing indexes:** when a new query filters by a column not in any known migration's `CREATE INDEX`, flags the potential missing index.
-- **Unbounded loops:** flags `while(true)` or loops without a guaranteed termination condition.
-- **Large in-memory allocations:** flags collection operations that could materialize the entire dataset (e.g. `.collect()`, `List::new()` in streaming contexts).
-- **Synchronous I/O in async context:** flags blocking calls inside async handlers (`time.sleep` in asyncio, `fs.readFileSync` in Node event handlers).
-
----
-
-## Section 5: AI-Powered Understanding
-
-These features go beyond static analysis. They require the agent to read the diff in context of the full repo, ask the model to reason about the code, and produce structured output. They run as part of `/review` and `/review deep`.
-
-### 5.1 Auto-summary
-
-The agent reads the full diff and generates a plain-English summary structured as:
-
-```markdown
-## What this PR does
-Adds rate limiting to the public API endpoints using a token bucket algorithm
-stored in Redis. Applies to /v1/auth/*, /v1/users/*, and /v1/events/* routes.
-
-## Why (inferred from diff + commit messages)
-Recent spike in unauthorized scraping attempts on the events endpoint.
-No issue linked but commit message references "abuse mitigation".
-
-## What changed
-- Added redis-rate-limiter middleware (new dependency)
-- Applied middleware to 3 route groups in server.js
-- Added RATE_LIMIT_WINDOW_MS and RATE_LIMIT_MAX to .env.example
-- Test suite updated for all 3 route groups
-
-## What was NOT changed (but might need attention)
-- Admin routes (/v1/admin/*) do not appear to be rate-limited
-- The Redis connection is not pooled — may need review under load
-```
-
-The **"What was NOT changed"** section is the differentiator — it reflects on the scope of the change and flags things adjacent to the diff that the author may not have considered.
-
-### 5.2 Intent clarifier
-
-Before a human reviewer opens the PR, the agent posts targeted questions to the author. These are questions that reviewers would ask anyway — getting them answered in advance makes human review faster.
-
-The agent generates questions by:
-1. Reading the diff and identifying decisions that are not self-evident.
-2. Checking the PR description and linked issues for answers already given.
-3. Posting only unanswered questions — typically 2–5 per PR.
-
-**Example questions:**
-- `'Why was the exponential backoff removed from the retry handler? Was this intentional or accidental?'`
-- `'This change removes the idempotency key check on payment processing. Is this safe? What guarantees idempotency now?'`
-- `'The new cache TTL is hardcoded to 300 seconds. Should this be configurable per environment?'`
-
-The agent posts as a review comment thread titled **"5 questions before review"**. Author answers inline. Human reviewer reads the answers alongside the diff. Async cycle eliminated.
-
-### 5.3 Blast radius analysis
-
-The agent traverses the repo to map what is affected by this diff beyond the changed files.
-
-| Category | What is checked |
-|---|---|
-| Imports | Which files import the changed modules? (direct consumers) |
-| API surface | Were any exported function signatures, types, or REST routes changed? (interface break risk) |
-| Tests | Which test files cover the changed code? Are they in this PR? |
-| Config | Were any environment variable names, config keys, or feature flags added/changed/removed? |
-| DB schema | Were any migrations included? If so, is the migration reversible? |
-| Dependents | Cross-repo: if this is a shared library, which other repos depend on it? (requires org-level access) |
-
-Output is posted as a structured table. Each row is a category; the right column is the list of affected artifacts with links.
-
-### 5.4 Historical pattern matching
-
-The agent searches the repo's git history for similar changes and correlates them with past outcomes.
-
-- Finds PRs in the last 2 years that touched the same files or functions.
-- Checks if any of those PRs were followed by a bug-fix PR within 7 days — a signal that the pattern is risky.
-- Surfaces relevant past review comments: `'In PR #312, a reviewer noted that this function has a concurrency issue. That comment was not resolved before merge.'`
-- Identifies recurring security issues: if the same class of vulnerability has been fixed and re-introduced in the same file more than once, posts a `WARN` with links.
-
----
-
-## Section 6: End-to-End Review Flow
-
-```
-1. PR opened / /review called
-2. Diff + context fetched
-3. Parallel analysis passes
-4. Structured comment posted
-5. Author responds
-6. Re-review on push
-```
-
-### Step 1: Event received
-
-- GitHub fires a webhook to the agent's endpoint on PR creation, comment creation (slash command), or push.
-- The agent validates the webhook signature (HMAC-SHA256) and confirms the command is from a repo member.
-- A job is queued. The agent posts a provisional comment: `"Review in progress — results in ~30s."`
-
-### Step 2: Context assembly
-
-- Fetches the full diff via GitHub API (`/pulls/{id}/files`).
-- Fetches the PR description, linked issues, and commit messages.
-- Fetches the full content of changed files (not just the diff) for blast radius and logic analysis.
-- Fetches the repo's dependency manifest (`package.json`, `requirements.txt`, `go.mod`, etc.).
-- If `/review deep`: also fetches related test files and recent git log for affected functions.
-
-### Step 3: Analysis (parallel)
-
-All analysis passes run in parallel. Each pass is independent and returns a structured result object:
+GitHub handles routing out of the box. Every webhook payload contains:
 
 ```json
 {
-  "pass": "secrets_scanner",
-  "severity": "HOLD",
-  "findings": [
-    {
-      "file": "src/config.js",
-      "line": 14,
-      "code": "const API_KEY = \"sk-prod-abc123...\"",
-      "message": "Hardcoded API key detected (entropy: 5.1). Move to environment variable.",
-      "cve": null,
-      "remediation": "Replace with process.env.ANTHROPIC_API_KEY"
-    }
-  ]
+  "installation": { "id": 12345 },
+  "repository": { "full_name": "acme/repo-a" },
+  "pull_request": { "number": 42 }
 }
 ```
 
-Severity levels: `HOLD | WARN | SUGGEST | PASS`
+We use `(installation_id, repo, pr_number)` as the job key. Each job is fully isolated.
 
-### Step 4: Structured comment posted
+**GitHub manages:** who installed the app, which repos it covers, token scoping per installation.
 
-The agent posts a single top-level comment replacing the provisional one:
+**We manage:** job isolation, API key lookup per installation, review logic, context assembly.
 
-```markdown
-## PR Scrutiny Agent — Review
-**Commit:** a3f9c2b · 3 files changed, 142 additions, 18 deletions
-
----
-### HOLD — Security (2 findings)
-> These must be resolved before merge.
-[S-01] src/config.js:14 — Hardcoded API key (entropy 5.1)
-[S-02] src/routes/users.js:88 — New endpoint /v1/users/:id/export has no auth middleware
-
----
-### WARN — Quality (1 finding)
-[Q-01] src/services/dataProcessor.js — Cyclomatic complexity 24. Consider splitting processEvents().
-
----
-### Questions for author (3)
-1. Why was the batch size hardcoded to 100? Should this be configurable?
-2. The old retry logic used exponential backoff. Was removing it intentional?
-3. Are admin routes intentionally excluded from the new rate limiting?
-
----
-### Summary
-Adds event batching to the data processor and a new CSV export endpoint.
-
----
-### Blast radius
-Direct consumers: 4 files | Interface change: No | Migration: No | Tests in PR: Partial
-
-_Review by PR Scrutiny Agent v1.0 · /re-review to refresh · /ask <question> to dig deeper_
-```
-
-### Step 5: Conversation continues
-
-- The author replies to specific finding comments or to the `/ask` command.
-- The agent reads the reply and responds conversationally — it can explain a finding, provide a code fix, or acknowledge a dismissal.
-- If the author writes `'/ask why is S-02 a security issue?'`, the agent explains in plain English with a concrete example.
-- If the author writes `'S-02 is a false positive — this route uses a session cookie checked by the global middleware'`, the agent can accept this and mark S-02 as `ACKNOWLEDGED`.
-
-### Step 6: Re-review on push
-
-- On every new push to the PR branch, the agent automatically re-runs all checks.
-- Posts a delta comment: `'Re-review complete. S-01 resolved. S-02 still open. Q-01 answered. 1 new SUGGEST finding.'`
-- Does not repost the full review — only the delta, to avoid noise.
-
----
-
-## Section 7: Technical Architecture
-
-### System overview
-
-The GitHub App is not the product — it is the transport layer. All AI logic lives in the agent runtime, which is infrastructure controlled by PR Scrutiny.
+### Installation model
 
 ```
-GitHub App
+Org installs GitHub App
     ↓
-Webhook Receiver
+GitHub creates Installation ID
     ↓
-Agent Runtime
+Customer adds their API key in settings
     ↓
-LLM Provider (Customer Key)
-    ↓
-GitHub PR Comments
+All repos in the org become active
 ```
 
-**GitHub manages:** authentication, permissions, repository access, webhook delivery.
-
-**PR Scrutiny manages:** agent logic, prompts, context construction, memory/state, API keys, review generation, conversation handling.
-
-### Deployment model
-
-The agent runtime can be hosted on any of the following:
-
-- Cloudflare Workers
-- AWS Lambda
-- Fly.io / Railway / Render
-- Self-hosted Docker
-
-The GitHub App registration is separate from the runtime host. Changing the runtime does not affect the GitHub App installation.
-
-### Installation flow
-
-1. Repository owner installs the GitHub App.
-2. GitHub creates an Installation ID for that org/repo.
-3. PR Scrutiny stores the installation and its token.
-4. Customer configures their model provider and API key.
-5. All repositories under that installation become active.
-
-```
-Acme Org
-    ↓
-PR Scrutiny Installation
-    ↓
-Customer API Key (Anthropic / OpenAI / Gemini / Bedrock)
-    ↓
-repo-a, repo-b, repo-c
-```
-
-### BYOK (Bring Your Own Key)
-
-The preferred billing model is customer-owned inference. PR Scrutiny never pays for tokens.
-
-| Provider | Credential type |
-|---|---|
-| Anthropic | API key |
-| OpenAI | API key |
-| Google Gemini | API key |
-| AWS Bedrock | IAM credentials |
-
-Billing flows directly between the customer and the model provider. PR Scrutiny has no visibility into token usage or cost.
-
-```
-GitHub Event
-    ↓
-PR Scrutiny Runtime
-    ↓
-Customer API Key
-    ↓
-LLM Provider
-```
+One installation covers the entire org. Individual repos can be excluded in settings.
 
 ### Permission model
 
-The installation belongs to the repository or organization, not to the individual who installed the app. All collaborators with sufficient repository access can invoke the agent.
+The installation belongs to the org, not the installer. All collaborators with PR access can use the agent.
 
-```
-Bob installs app
-    ↓
-Repository now has PR Scrutiny
-    ↓
-Charlie can use it
-David can use it
-```
-
-Default permission tiers:
-
-| Role | Allowed actions |
+| Role | Allowed |
 |---|---|
 | Any collaborator with PR access | `/review`, `/ask`, `/summarize`, `/blast-radius` |
-| Repository admin | Billing, API key configuration, app settings |
+| Repo admin | API key config, billing, app settings |
 
-### Components
+---
 
-| Component | Description |
+## 2. Slash Commands
+
+Typed into the PR comment box. Agent responds as a new comment within ~30 seconds.
+
+| Command | What it does |
 |---|---|
-| GitHub App | Registered at org level. Provides permissions, webhook delivery, and installation tokens. Does not contain agent logic. |
-| Webhook receiver | Node.js/Fastify service. Validates HMAC, parses events, enqueues jobs. |
-| Job queue | BullMQ on Redis. Handles parallel analysis passes with independent retry logic. |
-| Analysis workers | Python workers, one per analysis type. Stateless, scalable horizontally. |
-| LLM layer | Customer-provided API key. Supports Anthropic, OpenAI, Gemini, Bedrock. Used for logic review, auto-summary, intent questions, blast radius reasoning. |
-| Static analysis | AST parsers per language (acorn for JS, `ast` module for Python, tree-sitter for others). |
-| CVE database | OSV API + GitHub Advisory Database polled every 6 hours, cached in Redis. |
-| Context store | Redis for job state + ephemeral PR context. No persistent storage of code. |
-| GitHub API client | Octokit with exponential backoff and rate limit handling. |
+| `/review` | Full review: security, quality, blast radius, summary, intent questions |
+| `/review security` | Security-only: secrets, injection, dependencies, auth gaps |
+| `/review deep` | Full review + historical pattern matching, test coverage, complexity scoring |
+| `/review perf` | Performance pass: N+1 queries, unbounded loops, large allocations, missing indexes |
+| `/ask <question>` | Direct question about the PR |
+| `/summarize` | Plain-English TL;DR of what this PR does |
+| `/blast-radius` | Maps which modules, services, tests, and consumers are affected |
+| `/re-review` | Re-runs last full review on latest commit, shows delta only |
+| `/approve` | LGTM from agent if zero HOLD findings — for low-risk PRs with no available human reviewer |
+
+### Automatic triggers
+
+- **Draft → Ready:** agent runs `/summarize` + `/review security` before any human sees the PR.
+- **No reviewer for 24h:** agent posts `/summarize` and tags the team lead.
+- **Force-push after review:** agent posts a diff of what changed since the last review.
+
+---
+
+## 3. GitHub App Permissions
+
+Installed at the org level. Requested permissions:
+
+- Read: code, pull requests, issues, checks, metadata, repository contents, Actions
+- Write: pull request reviews, comments, check runs
+
+The agent cannot merge, push, or modify files. Ever.
+
+---
+
+## 4. What the Agent Reviews
+
+### Security (severity: HOLD — blocks merge)
+
+**Secrets scanner**
+- Regex patterns: AWS/GCP/GitHub/Stripe/Twilio API keys, PEM headers, JWTs, connection strings, Bearer tokens.
+- Entropy analysis: strings with Shannon entropy > 4.5 bits/char and length > 20 flagged as potential secrets.
+- Encoding bypass: base64-decodes candidate strings before scanning.
+- Ignores test fixtures, mock dirs, `.example` files — but flags `.env.example` with real-looking values.
+- Entropy flags post as WARN, not HOLD. Developer confirms or dismisses with 3 lines of context shown.
+
+**Injection surface**
+- SQL injection: traces request params through ORM calls, raw query builders, string concatenation.
+- Shell injection: `os.system()`, `subprocess`, `exec()`, `child_process.exec()` with non-literal args.
+- SSTI: `template.render()` with user-controlled template string.
+- XSS: user input into `innerHTML`, `document.write()`, `dangerouslySetInnerHTML`, `v-html`.
+- Path traversal: `fs.readFile`, `open()`, `Path.join()` with user-controlled input.
+
+**Dependency audit**
+- CVEs at CVSS 7.0+ flagged with CVE ID, score, and affected version range. Source: OSV + GitHub Advisory DB.
+- Yanked/deprecated packages and packages with no commits in 2+ years.
+- Packages published in the last 30 days with no prior version history (supply chain risk).
+- For CVSS 9.0+: also checks transitive dependencies.
+
+**Auth and access control**
+- New route handlers not wrapped in auth middleware.
+- `Access-Control-Allow-Origin: *` without allowlist, or `credentials: true` with wildcard origin.
+- `algorithms: 'none'` in JWT decode, missing signature verification.
+- New endpoints returning a resource by ID without an ownership check (IDOR).
+- New public endpoints doing expensive operations without a rate limiter.
+
+### Code quality (severity: SUGGEST — informational)
+
+**Logic review**
+- Off-by-one errors in loops, slices, pagination.
+- Condition inversions based on variable names and surrounding context.
+- Unreachable branches, always-true/false conditions.
+- Null/undefined deref on nullable types.
+- Shared mutable state across `await` boundaries in async code.
+
+**Complexity**
+- Cyclomatic complexity per changed function. Thresholds: ≤10 pass, 11–20 suggest refactor, >20 warn with decomposition proposal.
+- Cognitive complexity (Sonar metric) flagged if significantly higher than cyclomatic.
+
+**Test coverage**
+- New functions with no corresponding test case.
+- New branches (`if/else`, `switch`) with only one side tested.
+- Suggests specific missing cases: `'No test for error path when X is null.'`
+- Does not flag existing untested code — only new code in this PR.
+
+**Performance**
+- DB calls inside loops (N+1). Suggests batch/eager loading.
+- New queries filtering by unindexed columns.
+- `while(true)` or loops without guaranteed termination.
+- `.collect()` or equivalent materializing an entire dataset in a streaming context.
+- Blocking I/O inside async handlers (`time.sleep` in asyncio, `fs.readFileSync` in Node).
+
+### AI-powered features (runs with `/review`)
+
+**Auto-summary** — structured plain-English summary:
+- What this PR does
+- Why (inferred from diff + commit messages)
+- What changed
+- What was NOT changed (but might need attention) ← the differentiator
+
+**Intent clarifier** — 2–5 targeted questions posted before any human reviews. Only questions not already answered in the PR description. Author answers inline; human reviewer reads the thread.
+
+**Blast radius** — traverses the repo to map what is affected:
+
+| Category | What is checked |
+|---|---|
+| Imports | Files that import changed modules |
+| API surface | Exported signatures, types, or REST routes changed |
+| Tests | Test files covering changed code — are they in this PR? |
+| Config | Env vars, config keys, feature flags added/changed/removed |
+| DB schema | Migrations included? Reversible? |
+| Dependents | Cross-repo: other repos depending on this library (requires org token) |
+
+**Historical pattern matching** (with `/review deep`) — searches git history for similar changes, correlates with bug-fix PRs within 7 days, surfaces past review comments on the same functions, flags recurring vulnerability patterns.
+
+---
+
+## 5. Review Output Format
+
+### Severity levels
+
+| Level | Meaning |
+|---|---|
+| HOLD | Blocks merge. Security vulnerabilities, credential exposure, auth bypass. Requires explicit human resolution. |
+| WARN | Should be addressed before merge. High complexity, missing critical tests, hot-path performance issues. |
+| SUGGEST | Informational. Author can dismiss with a comment. |
+| PASS | Category ran clean. Explicit so absence of findings is never ambiguous. |
+| QUESTION | Intent clarification for the author. Closeable once answered. |
+
+### Comment structure
+
+```
+## PR Scrutiny Agent — Review
+Commit: a3f9c2b · 3 files changed, 142 additions, 18 deletions
+
+---
+HOLD — Security (2 findings)
+> These must be resolved before merge.
+[S-01] src/config.js:14 — Hardcoded API key (entropy 5.1)
+[S-02] src/routes/users.js:88 — New endpoint has no auth middleware
+
+---
+WARN — Quality (1 finding)
+[Q-01] src/services/dataProcessor.js — Cyclomatic complexity 24
+
+---
+Questions for author (3)
+1. Why was the batch size hardcoded to 100?
+2. Was removing exponential backoff intentional?
+3. Are admin routes excluded from rate limiting on purpose?
+
+---
+Summary
+Adds event batching and a new CSV export endpoint.
+
+---
+Blast radius
+Direct consumers: 4 files | Interface change: No | Migration: No | Tests in PR: Partial
+
+/re-review to refresh · /ask <question> to dig deeper
+```
+
+### Placement rules
+
+- `HOLD` and `WARN`: inline comments on the exact diff line.
+- Summary, questions, blast radius: single top-level PR comment.
+- `PASS` per category: top-level comment only.
+- Re-review delta: new top-level comment, not a full re-post.
+
+### What the agent does NOT do
+
+- No style nits. That is a linter's job.
+- No approvals unless `/approve` is called explicitly and HOLD count is zero.
+- No inline comments without a specific finding attached.
+- No repeating findings already marked ACKNOWLEDGED.
+- No impersonating a human reviewer.
+
+---
+
+## 6. System Architecture
 
 ### Data flow
 
@@ -466,15 +265,16 @@ Default permission tiers:
 GitHub Webhook
      │
      ▼
-Webhook Receiver (validates HMAC, rate-limits per repo)
+Webhook Receiver
+(validate HMAC-SHA256, confirm caller is repo member, rate-limit per repo)
      │
-     ▼ enqueue
+     ▼ enqueue job (installation_id, repo, pr_number)
 Job Queue (BullMQ / Redis)
      │
-     ├──► Security Worker ──► findings[]
-     ├──► Quality Worker  ──► findings[]
-     ├──► LLM Worker (Customer Key) ──► summary, questions, blast_radius
-     │
+     ├──► Security Worker   ──► findings[]
+     ├──► Quality Worker    ──► findings[]
+     ├──► LLM Worker        ──► summary, questions, blast_radius
+     │         └── uses customer API key from installation config
      ▼ aggregate
 Result Aggregator
      │
@@ -482,94 +282,59 @@ Result Aggregator
 GitHub Comment API ──► PR thread
 ```
 
-### Context assembly
-
-GitHub only delivers repository events — PR Scrutiny is responsible for building the full context the model receives.
-
-Fetched per invocation:
-
-- Pull request diff (`/pulls/{id}/files`)
-- Full content of changed files
-- PR description, linked issues, commit messages
-- Existing review comments
-- Repository dependency manifest (`package.json`, `requirements.txt`, `go.mod`, etc.)
-- For `/review deep`: related test files and recent git log for affected functions
-
-Assembled prompt structure:
+### Context assembled per job
 
 ```
 System Prompt
 +
-Repository Context
+PR diff + full changed file contents
 +
-Diff
+PR description, linked issues, commit messages
 +
-User Command
+Existing review comments
++
+Dependency manifest (package.json / requirements.txt / go.mod)
++
+[deep mode] related test files + git log for affected functions
 ```
 
-### LLM prompting strategy
+### LLM output formats
 
-The LLM is used for three tasks: logic review, auto-summary, and intent question generation. Each uses a dedicated system prompt and structured output format.
+- **Logic review:** `{ issues: [ { line, type, description, severity } ] }`
+- **Auto-summary:** streamed markdown, merged in a second pass for "What was NOT changed"
+- **Intent questions:** `[ { question, justification } ]` — justification used to de-duplicate against existing PR comments
 
-- **Logic review:** the diff for each changed function is sent with the function's call sites and test coverage. The model is asked to output JSON: `{ issues: [ { line, type, description, severity } ] }`.
-- **Auto-summary:** the full diff is chunked by file and summarized. Summaries are merged in a second pass that adds the "What was NOT changed" section.
-- **Intent questions:** the diff plus PR description is sent. The model is asked to output 2–5 questions as JSON, each with a justification string used for de-duplication against existing PR comments.
+### Storage
 
-### Privacy and security
+- Redis: job state + ephemeral PR context, 4-hour TTL per job.
+- No persistent code storage.
+- Installation config (encrypted API keys, settings): simple KV store keyed by Installation ID.
 
-- Code never leaves the agent's compute boundary unencrypted. TLS everywhere.
-- No code is stored persistently. Context is held in Redis with a 4-hour TTL per PR job.
-- Under BYOK, code is sent to the customer's chosen provider under the customer's own data agreement. PR Scrutiny does not retain or log model inputs/outputs.
-- The agent only accesses repositories it has been explicitly installed on.
-- **Audit log:** every agent action (comment posted, review requested, finding raised) is logged with a timestamp and the triggering user/event.
+### Privacy
 
----
-
-## Section 8: Output Format & Severity Model
-
-| Severity | Meaning |
-|---|---|
-| HOLD | Blocks merge. Security vulnerabilities, credential exposure, auth bypass. Requires explicit human resolution. |
-| WARN | Does not block but should be addressed before merge. High complexity, missing tests for critical paths, performance issues on hot paths. |
-| SUGGEST | Informational. Style, minor refactors, optional improvements. Author can dismiss with a comment. |
-| PASS | Category ran and found nothing. Posted per category so the absence of findings is explicit, not ambiguous. |
-| QUESTION | Intent clarification needed. Not a finding — a question for the author. Can be answered and closed. |
-
-### Annotation placement
-
-- `HOLD` and `WARN` findings are posted as **inline review comments** on the exact line — they appear in the diff view.
-- The summary, questions, and blast radius are posted as a **single top-level PR comment**.
-- `PASS` results per category are in the top-level comment only — not as inline comments.
-- Re-review delta is a new top-level comment replying to the original review comment.
-
-### What the agent does NOT do
-
-- It does not leave style nits (spacing, naming conventions, import order). That is a linter's job.
-- It does not approve PRs unless explicitly asked with `/approve`, and even then only if `HOLD` count is 0.
-- It does not comment on lines it did not analyze — every inline comment has a specific finding attached.
-- It does not repeat findings from a previous review if they have been marked `ACKNOWLEDGED`.
-- It does not impersonate a human reviewer. Every comment is clearly attributed to PR Scrutiny Agent.
+- TLS everywhere. Code never leaves the agent's compute boundary unencrypted.
+- Under BYOK, code is sent to the customer's provider under the customer's own data agreement.
+- Audit log: every agent action logged with timestamp and triggering user/event.
+- Agent only accesses repos it has been explicitly installed on.
 
 ---
 
-## Section 9: Open Questions & Future Work
+## 7. Open Questions
 
-### Open questions for team discussion
+1. **`/approve` scope:** should the agent satisfy a required reviewer count in branch protection rules? Needs team buy-in.
+2. **Cross-repo blast radius:** requires org-level token. What is the permission blast radius of that?
+3. **LLM cost on large diffs:** 500+ line diffs are expensive. Limit diff size or implement chunking?
+4. **Secrets scanner tuning:** how to measure and tune the entropy threshold without labelled data?
+5. **Mono-repo support:** blast radius traversal needs the internal dependency graph. Build it or consume an existing tool?
 
-1. **Scope of `/approve`:** should the agent be able to satisfy a required reviewer count in GitHub branch protection rules? This requires significant trust and clear team buy-in.
-2. **Cross-repo blast radius:** reading other repos requires org-level GitHub token. What is the blast radius of that permission?
-3. **LLM cost model:** logic review on large PRs (500+ line diffs) is expensive. Do we limit diff size per invocation or implement chunking?
-4. **False positive rate:** how do we measure and tune the secrets scanner entropy threshold without manual labelling data?
-5. **Mono-repo support:** blast radius traversal in a mono-repo requires knowing the dependency graph between packages. Does the agent build this or consume an existing tool?
+### Phase 2
 
-### Phase 2 candidates
-
-- **IDE plugin:** expose the same `/review` command inside VS Code and Cursor, running against local diffs before a PR is even opened.
-- **Learning mode:** the agent observes which of its findings humans override. Over time, per-repo tuning of thresholds.
-- **Reviewer assignment:** based on blast radius, suggest which team member is best positioned to review this PR.
-- **Test generation:** for functions flagged as missing test coverage, generate a test stub and commit it to the PR branch.
-- **Changelog generation:** after merge, auto-generate a CHANGELOG entry from the auto-summary.
+- IDE plugin: `/review` against local diffs before a PR is opened.
+- Learning mode: per-repo threshold tuning based on which findings humans override.
+- Reviewer assignment: suggest best reviewer based on blast radius.
+- Test generation: generate test stubs for flagged uncovered functions, commit to PR branch.
+- Changelog generation: auto-generate CHANGELOG entry from the auto-summary after merge.
 
 ---
 
-_PR Scrutiny Agent · Product Spec v1.0 · June 2026_
+_PR Scrutiny Agent · Spec v1.0 · June 2026_
