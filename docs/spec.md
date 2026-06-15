@@ -354,15 +354,107 @@ _Review by PR Scrutiny Agent v1.0 · /re-review to refresh · /ask <question> to
 
 ## Section 7: Technical Architecture
 
+### System overview
+
+The GitHub App is not the product — it is the transport layer. All AI logic lives in the agent runtime, which is infrastructure controlled by PR Scrutiny.
+
+```
+GitHub App
+    ↓
+Webhook Receiver
+    ↓
+Agent Runtime
+    ↓
+LLM Provider (Customer Key)
+    ↓
+GitHub PR Comments
+```
+
+**GitHub manages:** authentication, permissions, repository access, webhook delivery.
+
+**PR Scrutiny manages:** agent logic, prompts, context construction, memory/state, API keys, review generation, conversation handling.
+
+### Deployment model
+
+The agent runtime can be hosted on any of the following:
+
+- Cloudflare Workers
+- AWS Lambda
+- Fly.io / Railway / Render
+- Self-hosted Docker
+
+The GitHub App registration is separate from the runtime host. Changing the runtime does not affect the GitHub App installation.
+
+### Installation flow
+
+1. Repository owner installs the GitHub App.
+2. GitHub creates an Installation ID for that org/repo.
+3. PR Scrutiny stores the installation and its token.
+4. Customer configures their model provider and API key.
+5. All repositories under that installation become active.
+
+```
+Acme Org
+    ↓
+PR Scrutiny Installation
+    ↓
+Customer API Key (Anthropic / OpenAI / Gemini / Bedrock)
+    ↓
+repo-a, repo-b, repo-c
+```
+
+### BYOK (Bring Your Own Key)
+
+The preferred billing model is customer-owned inference. PR Scrutiny never pays for tokens.
+
+| Provider | Credential type |
+|---|---|
+| Anthropic | API key |
+| OpenAI | API key |
+| Google Gemini | API key |
+| AWS Bedrock | IAM credentials |
+
+Billing flows directly between the customer and the model provider. PR Scrutiny has no visibility into token usage or cost.
+
+```
+GitHub Event
+    ↓
+PR Scrutiny Runtime
+    ↓
+Customer API Key
+    ↓
+LLM Provider
+```
+
+### Permission model
+
+The installation belongs to the repository or organization, not to the individual who installed the app. All collaborators with sufficient repository access can invoke the agent.
+
+```
+Bob installs app
+    ↓
+Repository now has PR Scrutiny
+    ↓
+Charlie can use it
+David can use it
+```
+
+Default permission tiers:
+
+| Role | Allowed actions |
+|---|---|
+| Any collaborator with PR access | `/review`, `/ask`, `/summarize`, `/blast-radius` |
+| Repository admin | Billing, API key configuration, app settings |
+
 ### Components
 
 | Component | Description |
 |---|---|
-| GitHub App | Registered at org level. Receives webhooks, posts comments, manages check runs. |
+| GitHub App | Registered at org level. Provides permissions, webhook delivery, and installation tokens. Does not contain agent logic. |
 | Webhook receiver | Node.js/Fastify service. Validates HMAC, parses events, enqueues jobs. |
 | Job queue | BullMQ on Redis. Handles parallel analysis passes with independent retry logic. |
 | Analysis workers | Python workers, one per analysis type. Stateless, scalable horizontally. |
-| LLM layer | Claude API (`claude-sonnet-4-6`) for logic review, auto-summary, intent questions, blast radius reasoning. |
+| LLM layer | Customer-provided API key. Supports Anthropic, OpenAI, Gemini, Bedrock. Used for logic review, auto-summary, intent questions, blast radius reasoning. |
 | Static analysis | AST parsers per language (acorn for JS, `ast` module for Python, tree-sitter for others). |
 | CVE database | OSV API + GitHub Advisory Database polled every 6 hours, cached in Redis. |
 | Context store | Redis for job state + ephemeral PR context. No persistent storage of code. |
@@ -381,13 +473,38 @@ Job Queue (BullMQ / Redis)
      │
      ├──► Security Worker ──► findings[]
      ├──► Quality Worker  ──► findings[]
-     ├──► LLM Worker      ──► summary, questions, blast_radius
+     ├──► LLM Worker (Customer Key) ──► summary, questions, blast_radius
      │
      ▼ aggregate
 Result Aggregator
      │
      ▼
 GitHub Comment API ──► PR thread
+```
+
+### Context assembly
+
+GitHub only delivers repository events — PR Scrutiny is responsible for building the full context the model receives.
+
+Fetched per invocation:
+
+- Pull request diff (`/pulls/{id}/files`)
+- Full content of changed files
+- PR description, linked issues, commit messages
+- Existing review comments
+- Repository dependency manifest (`package.json`, `requirements.txt`, `go.mod`, etc.)
+- For `/review deep`: related test files and recent git log for affected functions
+
+Assembled prompt structure:
+
+```
+System Prompt
++
+Repository Context
++
+Diff
++
+User Command
 ```
 
 ### LLM prompting strategy
@@ -402,7 +519,7 @@ The LLM is used for three tasks: logic review, auto-summary, and intent question
 
 - Code never leaves the agent's compute boundary unencrypted. TLS everywhere.
 - No code is stored persistently. Context is held in Redis with a 4-hour TTL per PR job.
-- LLM API calls use Anthropic's data-processing agreement. Code sent to the model is covered by the zero-data-retention option.
+- Under BYOK, code is sent to the customer's chosen provider under the customer's own data agreement. PR Scrutiny does not retain or log model inputs/outputs.
 - The agent only accesses repositories it has been explicitly installed on.
 - **Audit log:** every agent action (comment posted, review requested, finding raised) is logged with a timestamp and the triggering user/event.
 
