@@ -5,26 +5,81 @@ import {
   isDeliverySeen, markDeliverySeen,
   jobKey, isJobActive, claimJob, releaseJob,
 } from './idempotency.js'
+import { assembleContext } from '../github/context.js'
+import { CommentPoster } from '../github/poster.js'
+import { runOrchestrator } from '../orchestrator/index.js'
+import type { Command, LLMProvider } from '../types/index.js'
 
 // Injected at server startup — set via environment variables
 let webhookSecret = ''
 export function setWebhookSecret(s: string) { webhookSecret = s }
 
-// ─── Stub: will be replaced in Phase 8 with real GitHub + orchestrator logic ─
+// ─── Config read from env at runtime ─────────────────────────────────────────
+
+function getLLMConfig(): { apiKey: string; provider: LLMProvider; model: string } {
+  const provider = (process.env['LLM_PROVIDER'] ?? 'openai') as LLMProvider
+  const model = process.env['LLM_MODEL'] ?? 'gpt-4o-mini'
+  const apiKey = process.env['OPENAI_API_KEY']
+    ?? process.env['ANTHROPIC_API_KEY']
+    ?? process.env['GOOGLE_API_KEY']
+    ?? ''
+  return { provider, model, apiKey }
+}
+
+// ─── Core job processor ───────────────────────────────────────────────────────
 
 async function processJob(
-  installationId: number,
+  installationToken: string,
   repo: string,
   prNumber: number,
   headSha: string,
-  command: string,
+  command: Command,
   question: string | undefined
 ): Promise<void> {
-  // Phase 7 stub — logs only. Phase 8 wires this to context assembler + orchestrator.
-  console.log(`[job] ${command} on ${repo}#${prNumber} @ ${headSha.slice(0, 7)} (install=${installationId})${question ? ` q="${question}"` : ''}`)
+  console.log(`[job] start ${command} ${repo}#${prNumber} @ ${headSha.slice(0, 7)}`)
+
+  const llm = getLLMConfig()
+  const poster = new CommentPoster(installationToken, repo)
+
+  try {
+    // Assemble context from GitHub API
+    const job = await assembleContext(repo, prNumber, {
+      command,
+      question,
+      installationToken,
+      llmApiKey: llm.apiKey,
+      llmProvider: llm.provider,
+      llmModel: llm.model,
+    })
+    job.pr.head_sha = headSha
+
+    // Run all agents
+    const { review } = await runOrchestrator(job)
+
+    // Post results to GitHub
+    await poster.postReview(prNumber, headSha, review)
+
+    console.log(`[job] done ${command} ${repo}#${prNumber}`)
+  } catch (err) {
+    console.error(`[job] error ${repo}#${prNumber}:`, err)
+    // Post error comment so user knows something went wrong
+    try {
+      await poster.postSummary(prNumber,
+        `## PR Scrutiny\n\n❌ Review failed: ${err instanceof Error ? err.message : String(err)}\n\nPlease try again or contact support.`
+      )
+    } catch {
+      // ignore secondary failure
+    }
+  }
 }
 
 // ─── Webhook handler ─────────────────────────────────────────────────────────
+
+// Token resolver — in Phase 9 replaced with Firestore lookup + KMS decrypt
+// For now: uses GITHUB_TOKEN env var (personal access token for dev)
+async function resolveInstallationToken(_installationId: number): Promise<string | null> {
+  return process.env['GITHUB_TOKEN'] ?? null
+}
 
 export async function handleWebhook(c: Context): Promise<Response> {
   const rawBody = await c.req.text()
@@ -76,7 +131,7 @@ export async function handleWebhook(c: Context): Promise<Response> {
   }
 
   // 7. Determine command
-  let command = 'review'
+  let command: Command = 'review'
   let question: string | undefined
 
   if (isSlashCommand) {
@@ -86,9 +141,8 @@ export async function handleWebhook(c: Context): Promise<Response> {
     command = parsed.command
     question = parsed.question
   }
-  // isPRSync → default 'review' (auto-review on PR open/sync)
 
-  // 8. Job dedup — need a headSha (for PR sync events we have it; for slash commands use pr number as key)
+  // 8. Job dedup
   const sha = ctx.headSha ?? `comment-${deliveryId}`
   const key = jobKey(ctx.repo, ctx.prNumber, sha)
 
@@ -96,11 +150,18 @@ export async function handleWebhook(c: Context): Promise<Response> {
     return c.json({ ok: true, skipped: 'job_already_running' })
   }
 
-  // 9. Return 200 immediately, process async
+  // 9. Resolve installation token (Phase 9: Firestore + KMS; now: env var)
+  const token = await resolveInstallationToken(ctx.installationId)
+  if (!token) {
+    console.warn(`[webhook] No token for installation ${ctx.installationId} — skipping`)
+    return c.json({ ok: true, skipped: 'no_installation_token' })
+  }
+
+  // 10. Return 200 immediately, process async
   claimJob(key)
   setImmediate(async () => {
     try {
-      await processJob(ctx.installationId, ctx.repo, ctx.prNumber!, sha, command, question)
+      await processJob(token, ctx.repo, ctx.prNumber!, sha, command, question)
     } finally {
       releaseJob(key)
     }
