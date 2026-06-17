@@ -1,0 +1,1 @@
+there are lots of free llm api now a days find few and use it, bad response its fine go ahead its free anyways  
