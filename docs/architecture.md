@@ -167,7 +167,7 @@ interface ReviewJob {
   command: Command
   question?: string           // only for /ask
 
-  // the diff
+  // the diff — always multiple files, one entry per changed file
   diff: FileDiff[]
 
   // PR context
@@ -180,8 +180,12 @@ interface ReviewJob {
     previous_head_sha?: string  // for /re-review delta
   }
 
-  // file contents (full files, not just diff)
+  // full content of every changed file
   changed_files: FileContent[]
+
+  // unchanged files pulled in for cross-file analysis (1 hop from changed files)
+  // e.g. auth middleware, shared utils — needed for injection taint and auth gap passes
+  related_files: FileContent[]
 
   // optional context
   dependency_manifest?: string  // package.json / requirements.txt / go.mod
@@ -213,6 +217,23 @@ interface FileContent {
   content: string
 }
 ```
+
+### Analysis scope — per-file vs cross-file
+
+A PR diff always spans multiple files. Some passes analyze each file independently; others require cross-file context.
+
+| Pass | Scope | Reason |
+|---|---|---|
+| Secrets scanner | Per-file | Secrets live in one place |
+| Complexity | Per-file | Function is self-contained |
+| Performance | Per-file | N+1, unbounded loops visible in one file |
+| Injection taint | Cross-file | Source (user input) and sink (DB/shell call) often in different files |
+| Auth gaps | Cross-file | Middleware defined in one file, route handler in another |
+| Test coverage | Per-file + cross | New function in `src/X.js`, test may be in `tests/X.test.js` |
+| Blast radius | Whole repo | Import graph is global |
+| Historical | Per changed file path | Git log queried per file |
+
+For cross-file passes, `related_files` provides the necessary context — the imports of changed files fetched one hop out. This is enough to trace injection paths and verify middleware coverage without pulling the entire repo.
 
 ### Orchestrator
 
@@ -620,6 +641,79 @@ The agents from Phase 1 still do not change. The only new code is the transforme
 - API key input, provider selection, email capture
 - Stores to installation config in Redis/KV
 - Error email sender (API key failures, quota exceeded)
+
+---
+
+## 5. Posting Results to GitHub
+
+After all agents complete, results are posted in two API calls regardless of how many findings there are.
+
+### Inline comments — HOLD and WARN findings
+
+All inline comments are batched into a single review object:
+
+```
+POST /repos/{owner}/{repo}/pulls/{pr_number}/reviews
+
+{
+  "commit_id": "a3f9c2b",
+  "event": "COMMENT",
+  "comments": [
+    {
+      "path": "src/config.js",
+      "line": 14,
+      "body": "[S-01] Hardcoded API key detected (entropy 5.1)"
+    },
+    {
+      "path": "src/routes/users.js",
+      "line": 88,
+      "body": "[S-02] New endpoint has no auth middleware"
+    }
+  ]
+}
+```
+
+One API call. All inline findings posted atomically.
+
+### Top-level comment — everything else
+
+Summary, questions, blast radius, SUGGEST findings, PASS results:
+
+```
+POST /repos/{owner}/{repo}/issues/{pr_number}/comments
+
+{
+  "body": "## PR Scrutiny Agent — Review\n..."
+}
+```
+
+PRs are issues in GitHub's model — top-level comments go to the issues endpoint.
+
+### Full post flow
+
+```
+AgentResult[] (all agents done)
+        ↓
+Formatter splits findings:
+  ├── inline[]  → HOLD + WARN with file + line
+  └── toplevel  → summary, questions, blast radius, SUGGEST, PASS
+        ↓
+Call 1: POST /pulls/{id}/reviews    (inline comments, batched)
+Call 2: POST /issues/{id}/comments  (top-level comment)
+        ↓
+Delete provisional "Review in progress..." comment
+```
+
+### Provisional comment
+
+When the job starts, before any analysis runs, we immediately post:
+
+```
+POST /issues/{id}/comments
+{ "body": "Review in progress — results in ~30s." }
+```
+
+Store the returned `comment_id`. When results are ready, delete it and post the real comment. This gives the user immediate feedback that the agent received the command.
 
 ---
 
