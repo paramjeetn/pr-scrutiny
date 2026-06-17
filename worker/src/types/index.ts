@@ -73,9 +73,20 @@ export interface AgentResult {
   metadata?: Record<string, unknown>
 }
 
+export type LLMProvider = 'anthropic' | 'openai' | 'google'
+
+export const PROVIDER_MODELS: Record<LLMProvider, string[]> = {
+  anthropic: ['claude-sonnet-4-5', 'claude-opus-4-5', 'claude-haiku-4-5'],
+  openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'],
+  google: ['gemini-2.5-flash', 'gemini-2.5-pro'],
+}
+
 export interface InstallationConfig {
-  api_key: string
-  provider: 'anthropic' | 'openai' | 'google'
-  email: string
+  api_key: string        // KMS-encrypted at rest
+  provider: LLMProvider
+  model: string          // e.g. "claude-sonnet-4-5"
+  email: string          // required — for error alerts (invalid key, quota exceeded)
   active: boolean
+  created_at: string
+  updated_at: string
 }
