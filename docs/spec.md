@@ -86,13 +86,11 @@ Typed into the PR comment box. Agent responds as a new comment within ~30 second
 |---|---|
 | `/review` | Full review: security, quality, blast radius, summary, intent questions |
 | `/review security` | Security-only: secrets, injection, dependencies, auth gaps |
-| `/review deep` | Full review + historical pattern matching, test coverage, complexity scoring |
 | `/review perf` | Performance pass: N+1 queries, unbounded loops, large allocations, missing indexes |
 | `/ask <question>` | Direct question about the PR |
 | `/summarize` | Plain-English TL;DR of what this PR does |
 | `/blast-radius` | Maps which modules, services, tests, and consumers are affected |
 | `/re-review` | Re-runs last full review on latest commit, shows delta only |
-| `/approve` | LGTM from agent if zero HOLD findings — for low-risk PRs with no available human reviewer |
 
 ### Automatic triggers
 
@@ -191,7 +189,7 @@ The agent cannot merge, push, or modify files. Ever.
 | DB schema | Migrations included? Reversible? |
 | Dependents | Cross-repo: other repos depending on this library (requires org token) |
 
-**Historical pattern matching** (with `/review deep`) — searches git history for similar changes, correlates with bug-fix PRs within 7 days, surfaces past review comments on the same functions, flags recurring vulnerability patterns.
+**Historical pattern matching** — searches git history for similar changes, correlates with bug-fix PRs within 7 days, surfaces past review comments on the same functions, flags recurring vulnerability patterns.
 
 ---
 
@@ -250,7 +248,6 @@ Direct consumers: 4 files | Interface change: No | Migration: No | Tests in PR: 
 ### What the agent does NOT do
 
 - No style nits. That is a linter's job.
-- No approvals unless `/approve` is called explicitly and HOLD count is zero.
 - No inline comments without a specific finding attached.
 - No repeating findings already marked ACKNOWLEDGED.
 - No impersonating a human reviewer.
@@ -295,7 +292,7 @@ Existing review comments
 +
 Dependency manifest (package.json / requirements.txt / go.mod)
 +
-[deep mode] related test files + git log for affected functions
+related test files + git log for affected functions (on `/review` invocation)
 ```
 
 ### LLM output formats
@@ -321,8 +318,7 @@ Dependency manifest (package.json / requirements.txt / go.mod)
 
 ## 7. Open Questions
 
-1. **`/approve` scope:** should the agent satisfy a required reviewer count in branch protection rules? Needs team buy-in.
-2. **Cross-repo blast radius:** requires org-level token. What is the permission blast radius of that?
+1. **Cross-repo blast radius:** requires org-level token. What is the permission blast radius of that?
 3. **LLM cost on large diffs:** 500+ line diffs are expensive. Limit diff size or implement chunking?
 4. **Secrets scanner tuning:** how to measure and tune the entropy threshold without labelled data?
 5. **Mono-repo support:** blast radius traversal needs the internal dependency graph. Build it or consume an existing tool?
