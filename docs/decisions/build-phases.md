@@ -309,15 +309,16 @@ Phases 7–10 are integration with GitHub and Cloud Run.
 - `src/storage/idempotency.ts`
   - `checkAndClaim(deliveryId)` -> boolean (true if new, false if duplicate)
   - 24h TTL on entries
+  - Replace in-memory Sets in `src/webhook/idempotency.ts` with Firestore-backed version
 - `src/setup/page.ts` — serves `GET /setup?installation_id=X`
   - Returns a small HTML page (no React — just a single HTML file served by Hono)
   - If installation already exists, pre-fills provider/model/email with current config (key masked as `sk-ant-••••••1234`)
   - Form fields:
     1. **Provider** — dropdown: `Anthropic | OpenAI | Google`
     2. **Model** — dropdown, updates based on provider selection:
-       - Anthropic: `claude-sonnet-4-5 | claude-opus-4-5 | claude-haiku-4-5`
-       - OpenAI: `gpt-4o | gpt-4o-mini | gpt-4-turbo`
-       - Google: `gemini-2.5-flash | gemini-2.5-pro`
+       - Anthropic: `claude-sonnet-4-6 | claude-opus-4-6 | claude-haiku-4-5`
+       - OpenAI: `gpt-4o | gpt-4o-mini | gpt-4.1 | gpt-4.1-mini`
+       - Google: `gemini-2.5-pro | gemini-2.5-flash | gemini-2.0-flash`
     3. **API Key** — text input, masked, placeholder shows expected format
     4. **Email** — required, for error alerts (invalid key, quota exceeded, provider outage)
     5. **Save & Activate** button
@@ -334,7 +335,7 @@ Phases 7–10 are integration with GitHub and Cloud Run.
 interface InstallationConfig {
   api_key: string        // KMS-encrypted at rest
   provider: 'anthropic' | 'openai' | 'google'
-  model: string          // e.g. "claude-sonnet-4-5"
+  model: string          // e.g. "claude-sonnet-4-6"
   email: string          // required
   active: boolean
   created_at: string
@@ -350,32 +351,153 @@ interface InstallationConfig {
 - Test call failure (bad key) -> error shown, nothing stored
 - Test call success -> config stored, success page shown
 - Model dropdown updates correctly per provider (JS in the HTML page)
+- Webhook handler reads installation token from Firestore (not env var)
 
 **Done when:** Full install flow works — GitHub App install -> redirect to `/setup` -> fill in key -> save -> reviews work on real PRs.
 
 ---
 
-## Phase 10 — E2E + Deploy
+## Phase 10 — GitHub App Registration + Deploy + E2E
 
-**What:** Full flow end to end. Deploy to Cloud Run.
+**What:** Register the GitHub App, deploy to Cloud Run, wire everything together, run E2E tests against production.
+
+### Step A — Register the GitHub App (manual, one-time)
+
+Do this before writing any deploy code. You need the App ID and private key before the server can exchange tokens.
+
+1. Go to `github.com/settings/apps/new` (personal) or `github.com/organizations/{org}/settings/apps/new` (org)
+2. **App name:** `PR Scrutiny` (must be globally unique on GitHub)
+3. **Homepage URL:** your Cloud Run URL (placeholder OK at first, update after deploy)
+4. **Webhook URL:** `https://<cloud-run-url>/webhook` — update after first deploy
+5. **Webhook secret:** generate a random 32-byte hex string, save it — this goes into Secret Manager as `GITHUB_WEBHOOK_SECRET`
+6. **Permissions (Repository):**
+   - `Contents`: Read (to fetch file contents + repo tree)
+   - `Pull requests`: Read & Write (to read diffs + post review comments)
+   - `Issues`: Read & Write (to post top-level PR comments)
+   - `Metadata`: Read (required by GitHub for all apps)
+7. **Subscribe to events:**
+   - `Pull request` (opened, reopened, synchronize)
+   - `Issue comment` (created — for slash commands)
+8. **Where can this GitHub App be installed?** — `Any account` (for public launch) or `Only on this account` (for testing)
+9. Click **Create GitHub App**
+10. Note the **App ID** (shown at top of app settings page)
+11. Scroll to **Private keys** → **Generate a private key** → downloads a `.pem` file
+12. Store in GCP Secret Manager:
+    - `GITHUB_APP_ID` = the numeric app ID
+    - `GITHUB_APP_PRIVATE_KEY` = contents of the `.pem` file
+    - `GITHUB_WEBHOOK_SECRET` = the random hex string from step 5
+
+**After deploy (step B):** come back and update the Webhook URL to the real Cloud Run URL, then click **Save changes**.
+
+**Setup redirect URL:** In app settings → **Callback URL** → set to `https://<cloud-run-url>/setup`. GitHub redirects here after a user installs the app. The `installation_id` query param is passed automatically.
+
+---
+
+### Step B — Dockerfile + Cloud Run Config
 
 **Build:**
-- E2E test: fixture -> all agents -> orchestrate -> format -> assert output
-- Wire real GitHub App credentials via GCP Secret Manager
-- Deploy to Cloud Run via Cloud Build
-- Create test repo, open test PR with known issues
-- Install GitHub App on test repo
-- Type `/review` in PR comment
-- Observe posted review
+- `Dockerfile`
+  ```dockerfile
+  FROM node:22-alpine
+  WORKDIR /app
+  COPY package*.json ./
+  RUN npm ci --production
+  COPY . .
+  RUN npm run build
+  EXPOSE 8080
+  CMD ["node", "dist/server.js"]
+  ```
+- `tsconfig.build.json` — separate tsconfig that outputs to `dist/`, excludes test files
+- `cloudbuild.yaml` — Cloud Build trigger:
+  ```yaml
+  steps:
+    - name: 'gcr.io/cloud-builders/docker'
+      args: ['build', '-t', 'gcr.io/$PROJECT_ID/pr-scrutiny:$COMMIT_SHA', '.']
+    - name: 'gcr.io/cloud-builders/docker'
+      args: ['push', 'gcr.io/$PROJECT_ID/pr-scrutiny:$COMMIT_SHA']
+    - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+      args:
+        - run
+        - deploy
+        - pr-scrutiny
+        - --image=gcr.io/$PROJECT_ID/pr-scrutiny:$COMMIT_SHA
+        - --region=us-central1
+        - --platform=managed
+        - --allow-unauthenticated
+        - --concurrency=1
+        - --memory=512Mi
+        - --timeout=120s
+  ```
+- Cloud Run env vars (all from Secret Manager):
+  - `GITHUB_APP_ID`
+  - `GITHUB_APP_PRIVATE_KEY`
+  - `GITHUB_WEBHOOK_SECRET`
+  - `GCP_PROJECT_ID`
+  - `KMS_KEY_NAME` (for installation API key encryption)
 
-**Test:**
-- Full pipeline with all agents produces expected comment structure
-- Review comment appears on real PR within 30 seconds
-- HOLD findings appear as inline comments on correct lines
-- Top-level comment has all sections
-- Agent trace shows timing for each agent
+**GCP setup (one-time CLI commands):**
+```bash
+# Enable APIs
+gcloud services enable run.googleapis.com firestore.googleapis.com \
+  cloudkms.googleapis.com secretmanager.googleapis.com cloudbuild.googleapis.com
 
-**Done when:** `/review` on a real PR works end-to-end in production.
+# Create Firestore database (native mode)
+gcloud firestore databases create --region=us-central1
+
+# Create KMS keyring + key for API key encryption
+gcloud kms keyrings create pr-scrutiny --location=global
+gcloud kms keys create installation-keys \
+  --keyring=pr-scrutiny --location=global \
+  --purpose=encryption
+
+# Store secrets
+echo -n "$GITHUB_APP_PRIVATE_KEY" | \
+  gcloud secrets create GITHUB_APP_PRIVATE_KEY --data-file=-
+echo -n "$GITHUB_WEBHOOK_SECRET" | \
+  gcloud secrets create GITHUB_WEBHOOK_SECRET --data-file=-
+echo -n "$GITHUB_APP_ID" | \
+  gcloud secrets create GITHUB_APP_ID --data-file=-
+
+# Grant Cloud Run SA access to secrets + KMS + Firestore
+PROJECT_ID=$(gcloud config get-value project)
+SA="$PROJECT_ID-compute@developer.gserviceaccount.com"
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:$SA" --role="roles/secretmanager.secretAccessor"
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:$SA" --role="roles/datastore.user"
+gcloud kms keys add-iam-policy-binding installation-keys \
+  --keyring=pr-scrutiny --location=global \
+  --member="serviceAccount:$SA" --role="roles/cloudkms.cryptoKeyEncrypterDecrypter"
+```
+
+---
+
+### Step C — E2E Tests (production)
+
+**File:** `tests/e2e/cloud-run.e2e.test.ts`
+
+Skipped unless `E2E=true` and `CLOUD_RUN_URL` env vars set. These tests hit the real deployed service.
+
+**Tests:**
+- `GET /health` returns `{status:'ok'}` within 2s (cold start included)
+- `POST /webhook` with invalid HMAC → 401 (server running, HMAC wired correctly)
+- `POST /webhook` with valid ping event → 200 pong (webhook secret correct)
+- Webhook triggers real review on test PR:
+  - POST a `/review:security` comment to PR #3 via GitHub API
+  - Wait up to 60s for a new review comment to appear on the PR
+  - Assert the comment body contains `## PR Scrutiny`
+  - Assert it contains `HOLD` or `blocking` (secrets + injection fixture)
+- Webhook triggers real summarize on test PR:
+  - POST a `/summarize` comment to PR #6 via GitHub API
+  - Wait up to 90s for new review comment (LLM involved)
+  - Assert comment contains `### 🤖 AI Summary`
+  - Assert comment contains `## PR Scrutiny`
+- Setup page:
+  - `GET /setup?installation_id=test` → 200 with HTML form
+  - `POST /setup` with bad API key → response contains error message
+  - `POST /setup` with valid API key → response contains success message, config stored in Firestore
+
+**Done when:** All E2E tests pass against the live Cloud Run URL. `/review` on a real PR produces a complete review comment within 90 seconds of the slash command being typed.
 
 ---
 
