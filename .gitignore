@@ -1,2 +1,5 @@
 docs/miscellaneous/
 CLAUDE.md
+node_modules/
+worker/node_modules/
+.wrangler/
