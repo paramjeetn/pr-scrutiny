@@ -16,6 +16,8 @@
     "@ai-sdk/anthropic": "^3.0.85",
     "@ai-sdk/google": "^3.0.83",
     "@ai-sdk/openai": "^3.0.72",
+    "@google-cloud/firestore": "^8.6.0",
+    "@google-cloud/kms": "^5.5.1",
     "ai": "^6.0.207",
     "hono": "^4.6.0",
     "octokit": "^5.0.5",

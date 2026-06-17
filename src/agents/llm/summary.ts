@@ -51,7 +51,7 @@ export async function runSummaryPass(
 ): Promise<{ finding: Finding; tokens: number; summary: SummaryOutput }> {
   const prompt = buildSummaryPrompt(job)
 
-  const { text, usage } = await generateText({ model, prompt, maxTokens: 512 })
+  const { text, usage } = await generateText({ model, prompt, maxOutputTokens: 512 })
 
   // Parse JSON — graceful fallback on malformed output
   let summary: SummaryOutput

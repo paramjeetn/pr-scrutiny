@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { config } from 'dotenv'
 import { handleWebhook, setWebhookSecret } from './webhook/handler.js'
+import { handleSetupGet, handleSetupPost } from './setup/handler.js'
 
 config()
 
@@ -10,6 +11,12 @@ const app = new Hono()
 
 app.get('/', (c) => c.json({ ok: true, service: 'pr-scrutiny', version: '0.1.0' }))
 app.get('/health', (c) => c.json({ ok: true }))
+
+// ─── Setup page (GitHub App post-install redirect) ────────────────────────────
+// GitHub redirects here after app install: /setup?installation_id=123
+
+app.get('/setup', handleSetupGet)
+app.post('/setup', handleSetupPost)
 
 // ─── Webhook endpoint ─────────────────────────────────────────────────────────
 

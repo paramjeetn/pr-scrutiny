@@ -34,7 +34,7 @@ export async function runAskPass(
   const question = job.question ?? 'Summarize this PR.'
   const prompt = buildAskPrompt(job, question)
 
-  const { text, usage } = await generateText({ model, prompt, maxTokens: 600 })
+  const { text, usage } = await generateText({ model, prompt, maxOutputTokens: 600 })
 
   const finding: Finding = {
     severity: 'PASS',

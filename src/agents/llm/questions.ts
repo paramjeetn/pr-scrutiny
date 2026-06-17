@@ -33,7 +33,7 @@ export async function runQuestionsPass(
 ): Promise<{ findings: Finding[]; tokens: number }> {
   const prompt = buildQuestionsPrompt(job)
 
-  const { text, usage } = await generateText({ model, prompt, maxTokens: 400 })
+  const { text, usage } = await generateText({ model, prompt, maxOutputTokens: 400 })
 
   let questions: string[] = []
   try {

@@ -9,14 +9,15 @@ import { assembleContext } from '../github/context.js'
 import { CommentPoster } from '../github/poster.js'
 import { runOrchestrator } from '../orchestrator/index.js'
 import type { Command, LLMProvider } from '../types/index.js'
+import { getInstallation } from '../storage/installations.js'
 
 // Injected at server startup — set via environment variables
 let webhookSecret = ''
 export function setWebhookSecret(s: string) { webhookSecret = s }
 
-// ─── Config read from env at runtime ─────────────────────────────────────────
+// ─── Config read from env at runtime (dev fallback) ──────────────────────────
 
-function getLLMConfig(): { apiKey: string; provider: LLMProvider; model: string } {
+function getLLMConfigFromEnv(): { apiKey: string; provider: LLMProvider; model: string } {
   const provider = (process.env['LLM_PROVIDER'] ?? 'openai') as LLMProvider
   const model = process.env['LLM_MODEL'] ?? 'gpt-4o-mini'
   const apiKey = process.env['OPENAI_API_KEY']
@@ -30,6 +31,7 @@ function getLLMConfig(): { apiKey: string; provider: LLMProvider; model: string 
 
 async function processJob(
   installationToken: string,
+  installationId: number,
   repo: string,
   prNumber: number,
   headSha: string,
@@ -38,7 +40,15 @@ async function processJob(
 ): Promise<void> {
   console.log(`[job] start ${command} ${repo}#${prNumber} @ ${headSha.slice(0, 7)}`)
 
-  const llm = getLLMConfig()
+  // Try Firestore installation config first, fall back to env vars (dev)
+  let llm: { apiKey: string; provider: LLMProvider; model: string }
+  const installation = await getInstallation(installationId).catch(() => null)
+  if (installation?.active && installation.api_key) {
+    llm = { apiKey: installation.api_key, provider: installation.provider, model: installation.model }
+  } else {
+    llm = getLLMConfigFromEnv()
+  }
+
   const poster = new CommentPoster(installationToken, repo)
 
   try {
@@ -75,9 +85,19 @@ async function processJob(
 
 // ─── Webhook handler ─────────────────────────────────────────────────────────
 
-// Token resolver — in Phase 9 replaced with Firestore lookup + KMS decrypt
-// For now: uses GITHUB_TOKEN env var (personal access token for dev)
-async function resolveInstallationToken(_installationId: number): Promise<string | null> {
+// Token resolver — uses GitHub App JWT flow in production, falls back to GITHUB_TOKEN env var for dev.
+// In production: App ID + private key are in Secret Manager; getInstallationToken() exchanges them.
+// In dev: set GITHUB_TOKEN in .env (personal access token with repo scope).
+async function resolveInstallationToken(installationId: number): Promise<string | null> {
+  // Production path: use GitHub App credentials from env/Secret Manager
+  const appId      = process.env['GITHUB_APP_ID']
+  const privateKey = process.env['GITHUB_APP_PRIVATE_KEY']
+  if (appId && privateKey) {
+    const { getInstallationToken } = await import('../github/auth.js')
+    return getInstallationToken(appId, privateKey, installationId)
+  }
+
+  // Dev fallback: plain personal access token
   return process.env['GITHUB_TOKEN'] ?? null
 }
 
@@ -161,7 +181,7 @@ export async function handleWebhook(c: Context): Promise<Response> {
   claimJob(key)
   setImmediate(async () => {
     try {
-      await processJob(token, ctx.repo, ctx.prNumber!, sha, command, question)
+      await processJob(token, ctx.installationId, ctx.repo, ctx.prNumber!, sha, command, question)
     } finally {
       releaseJob(key)
     }

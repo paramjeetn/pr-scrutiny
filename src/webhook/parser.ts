@@ -67,9 +67,10 @@ export interface WebhookContext {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function parseWebhookContext(eventType: string, deliveryId: string, body: any): WebhookContext {
-  const knownEvent = (['pull_request', 'issue_comment', 'pull_request_review', 'ping'] as const)
-    .includes(eventType as GitHubEventType)
-    ? eventType as GitHubEventType
+  const knownEvents = ['pull_request', 'issue_comment', 'pull_request_review', 'ping'] as const
+  type KnownEvent = typeof knownEvents[number]
+  const knownEvent: GitHubEventType = (knownEvents as readonly string[]).includes(eventType)
+    ? eventType as KnownEvent
     : 'unknown'
 
   const installationId: number = body?.installation?.id ?? 0
