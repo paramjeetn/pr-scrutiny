@@ -231,8 +231,8 @@ describe('Formatter', () => {
     const agg = makeAggregated([])
     const { summary } = format(agg)
     expect(summary).toContain('<details>')
-    expect(summary).toContain('Agent trace')
-    expect(summary).toContain('SecurityAgent')
+    expect(summary).toContain('Analysis details')
+    expect(summary).toContain('Security')
   })
 
   it('inline comment body includes remediation when present', () => {
@@ -279,7 +279,7 @@ describe('Orchestrator — review:security (no LLM)', () => {
   it('summary starts with PR Scrutiny Review header', async () => {
     const job = await loadFixture(FIXTURE_DIR, { command: 'review:security' })
     const { review } = await runOrchestrator(job)
-    expect(review.summary).toContain('## PR Scrutiny Review')
+    expect(review.summary).toContain('## PR Scrutiny')
   })
 
   it('trace.total_findings matches findings in review', async () => {

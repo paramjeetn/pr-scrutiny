@@ -170,6 +170,7 @@ describe('Webhook handler', () => {
   beforeEach(() => {
     _reset()
     setWebhookSecret('')  // no HMAC by default; individual tests opt in
+    process.env['GITHUB_TOKEN'] = 'fake-token-for-tests'
   })
 
   it('GET /webhook → 404 (only POST accepted)', async () => {
