@@ -1,0 +1,14 @@
+{
+  "number": 42,
+  "title": "Add user profile endpoint and update database utilities",
+  "description": "This PR adds a `/users/:id/profile` endpoint to expose user profile data. Also refactors the DB utility to use a connection pool and adds a helper for running raw queries.",
+  "commit_messages": [
+    "feat: add user profile route",
+    "refactor: move db connection to pool",
+    "fix: handle null user gracefully"
+  ],
+  "base_branch": "main",
+  "head_sha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+  "previous_head_sha": null,
+  "repo": "acme-corp/backend-api"
+}

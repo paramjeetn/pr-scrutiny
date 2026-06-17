@@ -1,5 +1,7 @@
 docs/miscellaneous/
 CLAUDE.md
+.claude/
 node_modules/
 worker/node_modules/
 .wrangler/
+dist/

@@ -1,0 +1,153 @@
+diff --git a/src/config.js b/src/config.js
+index 1a2b3c4..5d6e7f8 100644
+--- a/src/config.js
++++ b/src/config.js
+@@ -1,8 +1,14 @@
+ module.exports = {
+   port: process.env.PORT || 3000,
+   db: {
+-    host: process.env.DB_HOST,
+-    password: process.env.DB_PASSWORD,
++    host: 'prod-db.internal',
++    password: 'Sup3rS3cr3tP@ssw0rd!',
+   },
++  stripe: {
++    secretKey: 'sk_live_4eC39HqLyjWDarjtT1zdp7dc',
++    webhookSecret: 'whsec_abcdefghijklmnopqrstuvwxyz1234567890AB',
++  },
++  aws: {
++    accessKeyId: 'AKIAIOSFODNN7EXAMPLE1',
++    secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
++  },
+ }
+diff --git a/src/routes/users.js b/src/routes/users.js
+index 2b3c4d5..6e7f8a9 100644
+--- a/src/routes/users.js
++++ b/src/routes/users.js
+@@ -1,15 +1,47 @@
+ const express = require('express')
+ const router = express.Router()
+ const db = require('../utils/db')
++const { getUserById, searchUsers } = require('../utils/db')
+
+ // GET /users/:id
+ router.get('/:id', async (req, res) => {
+   const user = await db.findById(req.params.id)
+   if (!user) return res.status(404).json({ error: 'Not found' })
+   res.json(user)
+ })
++
++// GET /users/:id/profile — NEW: no auth middleware applied
++router.get('/:id/profile', async (req, res) => {
++  const userId = req.params.id
++  const user = await getUserById(userId)
++  if (!user) return res.status(404).json({ error: 'Not found' })
++  res.json({
++    id: user.id,
++    name: user.name,
++    email: user.email,
++    role: user.role,
++    createdAt: user.created_at,
++  })
++})
++
++// GET /users/search?q=... — NEW: raw SQL string concatenation
++router.get('/search', async (req, res) => {
++  const q = req.query.q
++  const results = await db.rawQuery(
++    'SELECT * FROM users WHERE name LIKE \'%' + q + '%\' OR email LIKE \'%' + q + '%\''
++  )
++  res.json(results)
++})
++
++// POST /admin/users — NEW: no auth, and uses eval for filter expressions
++router.post('/admin/users', async (req, res) => {
++  const { filter } = req.body
++  const fn = eval('(u) => ' + filter)
++  const users = await db.findAll()
++  res.json(users.filter(fn))
++})
++
+ module.exports = router
+diff --git a/src/utils/db.js b/src/utils/db.js
+index 3c4d5e6..7a8b9c0 100644
+--- a/src/utils/db.js
++++ b/src/utils/db.js
+@@ -1,12 +1,52 @@
+ const { Pool } = require('pg')
++const config = require('../config')
+
+-const pool = new Pool({ connectionString: process.env.DATABASE_URL })
++const pool = new Pool({
++  host: config.db.host,
++  password: config.db.password,
++  database: 'appdb',
++})
+
+ async function findById(id) {
+   const res = await pool.query('SELECT * FROM users WHERE id = $1', [id])
+   return res.rows[0] || null
+ }
+
+-module.exports = { findById }
++async function getUserById(id) {
++  return findById(id)
++}
++
++async function findAll() {
++  const res = await pool.query('SELECT * FROM users')
++  return res.rows
++}
++
++async function rawQuery(sql) {
++  const res = await pool.query(sql)
++  return res.rows
++}
++
++async function searchUsers(term) {
++  // N+1: fetches each user individually inside a loop
++  const ids = await pool.query('SELECT id FROM users WHERE active = true')
++  const results = []
++  for (const row of ids.rows) {
++    const user = await findById(row.id)
++    if (user && (user.name.includes(term) || user.email.includes(term))) {
++      results.push(user)
++    }
++  }
++  return results
++}
++
++// Complexity: deeply nested, high cyclomatic complexity
++async function processUserBatch(users, options) {
++  const out = []
++  for (const user of users) {
++    if (user.active) {
++      if (user.role === 'admin') {
++        if (options.includeAdmins) {
++          if (user.verified) {
++            if (options.strictMode) {
++              if (user.mfaEnabled) {
++                out.push({ ...user, tier: 'verified-admin-mfa' })
++              } else {
++                out.push({ ...user, tier: 'verified-admin' })
++              }
++            } else {
++              out.push({ ...user, tier: 'admin' })
++            }
++          } else if (options.allowUnverified) {
++            out.push({ ...user, tier: 'unverified-admin' })
++          }
++        }
++      } else if (user.role === 'moderator') {
++        if (options.includeModerators) {
++          out.push({ ...user, tier: 'moderator' })
++        }
++      } else {
++        out.push({ ...user, tier: 'user' })
++      }
++    }
++  }
++  return out
++}
++
++module.exports = { findById, getUserById, findAll, rawQuery, searchUsers, processUserBatch }

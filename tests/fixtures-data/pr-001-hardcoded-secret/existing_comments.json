@@ -1,0 +1,4 @@
+[
+  "Can you add pagination to the search endpoint?",
+  "The `findAll` query might be slow on large tables — consider adding a LIMIT."
+]
