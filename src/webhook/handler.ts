@@ -40,6 +40,11 @@ async function processJob(
 ): Promise<void> {
   console.log(`[job] start ${command} ${repo}#${prNumber} @ ${headSha.slice(0, 7)}`)
 
+  const poster = new CommentPoster(installationToken, repo)
+
+  // Post provisional immediately — before any slow Firestore/API calls
+  const provisionalId = await poster.postProvisional(prNumber, command).catch(() => 0)
+
   // Try Firestore installation config first, fall back to env vars (dev)
   let llm: { apiKey: string; provider: LLMProvider; model: string }
   const installation = await getInstallation(installationId).catch(() => null)
@@ -48,11 +53,6 @@ async function processJob(
   } else {
     llm = getLLMConfigFromEnv()
   }
-
-  const poster = new CommentPoster(installationToken, repo)
-
-  // Post provisional immediately so user sees feedback right away
-  const provisionalId = await poster.postProvisional(prNumber, command).catch(() => 0)
 
   try {
     // Assemble context from GitHub API
