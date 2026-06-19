@@ -18,7 +18,9 @@ const BLOCKING_IO_PATTERNS = [
 ]
 
 // Infinite loop without visible exit
-const WHILE_TRUE = /\bwhile\s*\(\s*true\s*\)/
+// JS/TS: while(true), while (true), for(;;)
+// Python: while True:, while true: (lowercase tolerated), while 1:
+const WHILE_TRUE = /\bwhile\s*\(\s*true\s*\)|\bfor\s*\(\s*;\s*;\s*\)|\bwhile\s+[Tt]rue\s*:|\bwhile\s+1\s*:/
 
 // Stream / full materialization anti-patterns
 const FULL_COLLECT_PATTERNS = [
