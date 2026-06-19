@@ -3,6 +3,7 @@ import { serve } from '@hono/node-server'
 import { config } from 'dotenv'
 import { handleWebhook, setWebhookSecret } from './webhook/handler.js'
 import { handleSetupGet, handleSetupPost } from './setup/handler.js'
+import { renderLandingPage } from './landing/page.js'
 
 config()
 
@@ -10,7 +11,7 @@ const app = new Hono()
 
 // ─── Health check ────────────────────────────────────────────────────────────
 
-app.get('/', (c) => c.json({ ok: true, service: 'pr-scrutiny', version: '0.1.0' }))
+app.get('/', (c) => c.html(renderLandingPage()))
 app.get('/health', (c) => c.json({ ok: true }))
 
 // ─── Setup page (GitHub App post-install redirect) ────────────────────────────
