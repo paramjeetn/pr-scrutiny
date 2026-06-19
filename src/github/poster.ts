@@ -1,5 +1,6 @@
 import { Octokit } from 'octokit'
 import type { FormattedReview, InlineComment } from '../orchestrator/formatter.js'
+import type { Command } from '../types/index.js'
 
 // ─── Comment poster ──────────────────────────────────────────────────────────
 
@@ -16,13 +17,22 @@ export class CommentPoster {
     this.repo = repo
   }
 
-  /** Post a provisional "reviewing..." comment. Returns comment ID for later deletion. */
-  async postProvisional(prNumber: number): Promise<number> {
+  /** Post a provisional "working..." comment. Returns comment ID for later deletion. */
+  async postProvisional(prNumber: number, command: Command): Promise<number> {
+    const messages: Record<Command, string> = {
+      'review':          '🔍 **PR Scrutiny** is reviewing this PR...',
+      're-review':       '🔍 **PR Scrutiny** is reviewing this PR...',
+      'review:security': '🔍 **PR Scrutiny** is reviewing this PR...',
+      'review:perf':     '🔍 **PR Scrutiny** is reviewing this PR...',
+      'summarize':       '📝 **PR Scrutiny** is summarizing this PR...',
+      'ask':             '💬 **PR Scrutiny** is thinking...',
+      'blast-radius':    '💥 **PR Scrutiny** is mapping blast radius...',
+    }
     const { data } = await this.octokit.rest.issues.createComment({
       owner: this.owner,
       repo: this.repo,
       issue_number: prNumber,
-      body: '🔍 **PR Scrutiny** is reviewing this PR...',
+      body: messages[command] ?? '🔍 **PR Scrutiny** is working...',
     })
     return data.id
   }
@@ -80,16 +90,16 @@ export class CommentPoster {
   }
 
   /**
-   * Full post flow: provisional → review → delete provisional.
+   * Full post flow: delete provisional → post inline + summary.
+   * provisionalId: ID of the "working..." comment posted before the job started.
    * Falls back gracefully — if inline review fails, summary still posts.
    */
   async postReview(
     prNumber: number,
     headSha: string,
-    review: FormattedReview
+    review: FormattedReview,
+    provisionalId: number
   ): Promise<void> {
-    const provisionalId = await this.postProvisional(prNumber)
-
     try {
       // Inline comments first (batched)
       if (review.inline.length > 0) {

@@ -51,6 +51,9 @@ async function processJob(
 
   const poster = new CommentPoster(installationToken, repo)
 
+  // Post provisional immediately so user sees feedback right away
+  const provisionalId = await poster.postProvisional(prNumber, command).catch(() => 0)
+
   try {
     // Assemble context from GitHub API
     const job = await assembleContext(repo, prNumber, {
@@ -66,13 +69,14 @@ async function processJob(
     // Run all agents
     const { review } = await runOrchestrator(job)
 
-    // Post results to GitHub
-    await poster.postReview(prNumber, headSha, review)
+    // Post results to GitHub (deletes provisional in finally)
+    await poster.postReview(prNumber, headSha, review, provisionalId)
 
     console.log(`[job] done ${command} ${repo}#${prNumber}`)
   } catch (err) {
     console.error(`[job] error ${repo}#${prNumber}:`, err)
-    // Post error comment so user knows something went wrong
+    // Delete provisional + post error comment
+    if (provisionalId) await poster.deleteComment(provisionalId)
     try {
       await poster.postSummary(prNumber,
         `## PR Scrutiny\n\n❌ Review failed: ${err instanceof Error ? err.message : String(err)}\n\nPlease try again or contact support.`

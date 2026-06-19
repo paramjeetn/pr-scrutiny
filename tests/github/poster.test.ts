@@ -33,12 +33,32 @@ describe('CommentPoster', () => {
     expect(() => new CommentPoster('token', 'notvalid')).toThrow('Invalid repo')
   })
 
-  it('postProvisional posts a comment and returns its ID', async () => {
+  it('postProvisional posts a command-specific comment and returns its ID', async () => {
     const poster = new CommentPoster('token', 'acme/backend')
-    const id = await poster.postProvisional(42)
+    const id = await poster.postProvisional(42, 'review')
     expect(id).toBe(101)
     expect(mockCreateComment).toHaveBeenCalledWith(
       expect.objectContaining({ issue_number: 42, body: expect.stringContaining('reviewing') })
+    )
+  })
+
+  it('postProvisional uses command-specific messages', async () => {
+    const poster = new CommentPoster('token', 'acme/backend')
+    await poster.postProvisional(42, 'summarize')
+    expect(mockCreateComment).toHaveBeenCalledWith(
+      expect.objectContaining({ body: expect.stringContaining('summarizing') })
+    )
+    vi.clearAllMocks()
+    mockCreateComment.mockResolvedValue({ data: { id: 101 } })
+    await poster.postProvisional(42, 'ask')
+    expect(mockCreateComment).toHaveBeenCalledWith(
+      expect.objectContaining({ body: expect.stringContaining('thinking') })
+    )
+    vi.clearAllMocks()
+    mockCreateComment.mockResolvedValue({ data: { id: 101 } })
+    await poster.postProvisional(42, 'blast-radius')
+    expect(mockCreateComment).toHaveBeenCalledWith(
+      expect.objectContaining({ body: expect.stringContaining('blast radius') })
     )
   })
 
@@ -90,21 +110,21 @@ describe('CommentPoster', () => {
     expect(mockCreateReview).not.toHaveBeenCalled()
   })
 
-  it('postReview: posts provisional, inline review, summary, then deletes provisional', async () => {
+  it('postReview: posts inline review + summary, then deletes provisional', async () => {
     const poster = new CommentPoster('token', 'acme/backend')
     const review: FormattedReview = {
       inline: [{ path: 'src/config.js', line: 5, body: '🚫 **HOLD**: Secret' }],
       summary: '## PR Scrutiny Review\n\nFound 1 issue.',
     }
 
-    await poster.postReview(42, 'sha123', review)
+    await poster.postReview(42, 'sha123', review, 999)
 
-    // provisional + summary = 2 createComment calls
-    expect(mockCreateComment).toHaveBeenCalledTimes(2)
+    // summary only (provisional was posted externally)
+    expect(mockCreateComment).toHaveBeenCalledTimes(1)
     // inline review
     expect(mockCreateReview).toHaveBeenCalledTimes(1)
     // provisional deleted
-    expect(mockDeleteComment).toHaveBeenCalledTimes(1)
+    expect(mockDeleteComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 999 }))
   })
 
   it('postReview: inline failure does not prevent summary posting', async () => {
@@ -115,10 +135,10 @@ describe('CommentPoster', () => {
       summary: '## PR Scrutiny Review\n\nFound issues.',
     }
 
-    await poster.postReview(42, 'sha123', review)
+    await poster.postReview(42, 'sha123', review, 101)
 
     // Summary still posted despite inline failure
-    expect(mockCreateComment).toHaveBeenCalledTimes(2)  // provisional + summary
+    expect(mockCreateComment).toHaveBeenCalledTimes(1)  // summary only
     expect(mockDeleteComment).toHaveBeenCalledTimes(1)
   })
 
@@ -129,9 +149,9 @@ describe('CommentPoster', () => {
       summary: '## PR Scrutiny Review\n\nAll clear.',
     }
 
-    await poster.postReview(42, 'sha123', review)
+    await poster.postReview(42, 'sha123', review, 101)
 
     expect(mockCreateReview).not.toHaveBeenCalled()
-    expect(mockCreateComment).toHaveBeenCalledTimes(2)  // provisional + summary
+    expect(mockCreateComment).toHaveBeenCalledTimes(1)  // summary only
   })
 })
