@@ -162,8 +162,9 @@ export async function handleWebhook(c: Context): Promise<Response> {
     question = parsed.question
   }
 
-  // 8. Job dedup
-  const sha = ctx.headSha ?? `comment-${deliveryId}`
+  // 8. Job dedup — slash commands don't carry headSha, use command as suffix so
+  // /review on the same PR won't double-run if a PR sync event fires simultaneously
+  const sha = ctx.headSha ?? `${command}-${ctx.prNumber}`
   const key = jobKey(ctx.repo, ctx.prNumber, sha)
 
   if (isJobActive(key)) {
