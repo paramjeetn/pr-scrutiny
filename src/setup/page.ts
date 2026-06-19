@@ -40,6 +40,38 @@ export function renderSetupPage(opts: {
     }</option>`)
     .join('\n')
 
+  if (success) {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PR Scrutiny — Setup Complete</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f6f8fa; margin: 0; padding: 40px 16px; color: #1f2328; }
+    .card { background: #fff; border: 1px solid #d0d7de; border-radius: 12px; max-width: 480px; margin: 0 auto; padding: 40px 32px; text-align: center; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .check { font-size: 48px; margin: 20px 0 12px; }
+    .msg { color: #1a7f37; font-size: 17px; font-weight: 600; margin: 0 0 10px; }
+    .sub { color: #656d76; font-size: 14px; margin: 0 0 28px; line-height: 1.6; }
+    code { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 4px; padding: 2px 6px; font-size: 13px; color: #1f2328; }
+    .update-link { font-size: 13px; color: #0969da; text-decoration: none; }
+    .update-link:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>PR Scrutiny</h1>
+    <div class="check">✅</div>
+    <p class="msg">You're all set!</p>
+    <p class="sub">PR Scrutiny is active on your repos.<br>Type <code>/review</code> on any pull request to get started.</p>
+    <a class="update-link" href="/setup?installation_id=${installationId}">Update settings</a>
+  </div>
+</body>
+</html>`
+  }
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -65,12 +97,14 @@ export function renderSetupPage(opts: {
       border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 4px;
       transition: background 0.15s;
     }
-    button[type=submit]:hover { background: #2c974b; }
+    button[type=submit]:hover:not(:disabled) { background: #2c974b; }
+    button[type=submit]:disabled { background: #94d3a2; cursor: not-allowed; }
     .alert { padding: 12px 16px; border-radius: 6px; font-size: 13px; margin-bottom: 20px; }
     .alert-error { background: #fff0f0; border: 1px solid #ffb8b8; color: #cf222e; }
-    .alert-success { background: #f0fff4; border: 1px solid #b8f0c8; color: #1a7f37; }
     .divider { border: none; border-top: 1px solid #d0d7de; margin: 20px 0; }
     .existing-note { font-size: 12px; color: #656d76; margin: -12px 0 16px; }
+    .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid rgba(255,255,255,0.4); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -78,10 +112,9 @@ export function renderSetupPage(opts: {
     <h1>PR Scrutiny</h1>
     <p class="subtitle">Installation #${installationId} — configure your LLM provider</p>
 
-    ${error   ? `<div class="alert alert-error">${error}</div>` : ''}
-    ${success ? `<div class="alert alert-success">You're all set. PR Scrutiny is active on your repos. Type <code>/review</code> on any PR to get started.</div>` : ''}
+    ${error ? `<div class="alert alert-error">${error}</div>` : ''}
 
-    <form method="POST" action="/setup">
+    <form method="POST" action="/setup" onsubmit="handleSubmit()">
       <input type="hidden" name="installation_id" value="${installationId}">
 
       <label for="provider">LLM Provider</label>
@@ -109,7 +142,7 @@ export function renderSetupPage(opts: {
 
       <hr class="divider">
 
-      <button type="submit">${existing ? 'Save changes' : 'Save & Activate'}</button>
+      <button type="submit" id="submit-btn">${existing ? 'Save changes' : 'Save & Activate'}</button>
     </form>
   </div>
 
@@ -120,6 +153,11 @@ export function renderSetupPage(opts: {
       const sel = document.getElementById('model');
       sel.innerHTML = MODELS[provider].map(m => '<option value="' + m + '">' + m + '</option>').join('');
       document.getElementById('api_key').placeholder = placeholders[provider] || '';
+    }
+    function handleSubmit() {
+      const btn = document.getElementById('submit-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span>Verifying key\u2026';
     }
   </script>
 </body>

@@ -161,7 +161,7 @@ describe('POST /setup', () => {
     const app = await makeApp()
     const res = await postSetup(app, {
       installation_id: '1', provider: 'openai', model: 'gpt-4o-mini',
-      api_key: 'sk-ant-anthropic-key-here', email: 'a@b.com',
+      api_key: 'AIza-google-key-not-openai-xxxxx', email: 'a@b.com',
     })
     const html = await res.text()
     expect(html).toContain('sk-')

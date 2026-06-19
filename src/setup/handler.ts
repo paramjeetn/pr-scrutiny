@@ -41,7 +41,7 @@ async function testApiKey(provider: LLMProvider, model: string, apiKey: string):
     await generateText({
       model: languageModel,
       prompt: 'Reply with the single word: ok',
-      maxOutputTokens: 5,
+      maxOutputTokens: 16,
     })
     return null  // success
   } catch (err) {
