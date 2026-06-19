@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { serve } from '@hono/node-server'
 import { config } from 'dotenv'
 import { handleWebhook, setWebhookSecret } from './webhook/handler.js'
 import { handleSetupGet, handleSetupPost } from './setup/handler.js'
@@ -24,8 +25,8 @@ app.post('/webhook', handleWebhook)
 
 // ─── Startup ─────────────────────────────────────────────────────────────────
 
-const port = Number(process.env.PORT ?? 3000)
-const secret = process.env.GITHUB_WEBHOOK_SECRET ?? ''
+const port = Number(process.env['PORT'] ?? 3000)
+const secret = process.env['GITHUB_WEBHOOK_SECRET'] ?? ''
 
 if (secret) {
   setWebhookSecret(secret)
@@ -34,9 +35,6 @@ if (secret) {
   console.warn('GITHUB_WEBHOOK_SECRET not set — HMAC validation disabled (dev mode)')
 }
 
-export default {
-  port,
-  fetch: app.fetch,
-}
-
-console.log(`PR Scrutiny server listening on port ${port}`)
+serve({ fetch: app.fetch, port }, () => {
+  console.log(`PR Scrutiny server listening on port ${port}`)
+})

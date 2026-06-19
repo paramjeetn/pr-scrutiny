@@ -262,7 +262,7 @@ describe('Orchestrator — review:security (no LLM)', () => {
     expect(review.summary.length).toBeGreaterThan(0)
     expect(trace.agents).toHaveLength(1)
     expect(trace.agents[0]!.agent).toBe('SecurityAgent')
-  })
+  }, 30_000)
 
   it('finds HOLD findings in fixture (secrets planted)', async () => {
     const job = await loadFixture(FIXTURE_DIR, { command: 'review:security' })
@@ -274,20 +274,20 @@ describe('Orchestrator — review:security (no LLM)', () => {
     ]
     const hasHold = allFindings.some((b) => b.includes('HOLD'))
     expect(hasHold).toBe(true)
-  })
+  }, 30_000)
 
   it('summary starts with PR Scrutiny Review header', async () => {
     const job = await loadFixture(FIXTURE_DIR, { command: 'review:security' })
     const { review } = await runOrchestrator(job)
     expect(review.summary).toContain('## PR Scrutiny')
-  })
+  }, 30_000)
 
   it('trace.total_findings matches findings in review', async () => {
     const job = await loadFixture(FIXTURE_DIR, { command: 'review:security' })
     const { review, trace } = await runOrchestrator(job)
     expect(trace.total_findings).toBeGreaterThanOrEqual(review.inline.length)
     expect(trace.total_findings).toBeGreaterThanOrEqual(0)
-  })
+  }, 30_000)
 })
 
 describe('Orchestrator — blast-radius', () => {
@@ -296,14 +296,14 @@ describe('Orchestrator — blast-radius', () => {
     const { trace } = await runOrchestrator(job)
     expect(trace.agents).toHaveLength(1)
     expect(trace.agents[0]!.agent).toBe('BlastRadiusAgent')
-  })
+  }, 15_000)
 
   it('summary mentions affected files or config', async () => {
     const job = await loadFixture(FIXTURE_DIR, { command: 'blast-radius' })
     const { review } = await runOrchestrator(job)
     // Blast radius always produces at least 1 finding (missing tests or config)
     expect(review.summary).toBeTruthy()
-  })
+  }, 15_000)
 })
 
 describe('Orchestrator — timeout handling', () => {

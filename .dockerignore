@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+.env.local
+tests
+*.test.ts
+.git
+.gitignore
+docs
+worker
